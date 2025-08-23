@@ -1,20 +1,26 @@
-from transformers import TrainingArguments
+from transformers import TrainingArguments, Trainer
 from dataset import load_cnn_dailymail
 from model import get_lora_model
 from config import TRAIN_BATCH_SIZE, EVAL_BATCH_SIZE, MAX_LENGTH, LEARNING_RATE, MAX_STEPS, OUTPUT_DIR
-from peft import LoraConfig, get_peft_model, PEFTTrainer
+from peft import LoraConfig, get_peft_model
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from config import MODEL_NAME, APITOKEN
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME,token=APITOKEN)
 
 # Load datasets
 train_dataset, val_dataset = load_cnn_dailymail()
 
 # Load LoRA model
-model = get_lora_model()
+peft_model = get_lora_model()
+batch_size = 128
 
-# Define training arguments
-training_args = TrainingArguments(
+# Define PEFT training arguments
+peft_training_args = TrainingArguments(
     output_dir="./qwen-lora",
-    per_device_train_batch_size=2,
+    per_device_train_batch_size=batch_size,
     gradient_accumulation_steps=8,
+    per_device_eval_batch_size=batch_size,
     num_train_epochs=3,
     learning_rate=3e-4,
     fp16=True,
@@ -24,12 +30,17 @@ training_args = TrainingArguments(
 )
 
 # Initialize PEFT trainer
-trainer = PEFTTrainer(
-    model=model,
+peft_trainer = Trainer(
+    model=peft_model,
+    args=peft_training_args,
     train_dataset=train_dataset,
     eval_dataset=val_dataset,
-    tokenizer=tokenizer,
-    args=training_args
 )
-#Start training
-trainer.train()
+
+# Train PEFT model
+peft_trainer.train()
+peft_model_path="./peft-text-summary"
+
+# Saving model to local directory
+peft_trainer.model.save_pretrained(peft_model_path)
+tokenizer.save_pretrained(peft_model_path)
