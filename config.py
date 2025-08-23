@@ -1,0 +1,7 @@
+MODEL_NAME = "facebook/opt-1.3b"  # base model
+MAX_LENGTH = 512
+TRAIN_BATCH_SIZE = 2
+EVAL_BATCH_SIZE = 2
+LEARNING_RATE = 2e-4
+MAX_STEPS = 1000
+OUTPUT_DIR = "./outputs"
