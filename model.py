@@ -5,7 +5,6 @@ from config import MODEL_NAME, APITOKEN
 import torch
 
 def get_lora_model():
-    # tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME,token=APITOKEN)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, device_map={"": device},torch_dtype=torch.float32, token=APITOKEN)
 
