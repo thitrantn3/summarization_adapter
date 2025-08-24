@@ -1,6 +1,10 @@
 from datasets import load_dataset
 from transformers import AutoTokenizer
-from config import MODEL_NAME, MAX_LENGTH
+from config import MODEL_NAME, MAX_LENGTH, APITOKEN
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME,token=APITOKEN, max_length=512, padding="max_length", truncation=True)
+tokenizer.pad_token = tokenizer.eos_token
+
 
 def load_cnn_dailymail(num_train=1000, num_val=200):
     dataset = load_dataset("cnn_dailymail", "3.0.0")
@@ -19,24 +23,43 @@ def load_cnn_dailymail(num_train=1000, num_val=200):
 
     train_dataset = train_dataset.map(make_prompt)
     val_dataset = val_dataset.map(make_prompt)
+    return train_dataset, val_dataset
 
+def tokenizer_fn(examples):
+    # For causal LM, labels are same as input_ids
+    # examples["labels"] = examples["text"].copy()
+    examples = tokenizer(examples['text'], truncation=True, padding="max_length", max_length=512)
+
+    return examples
+
+def tokenize_dataset(train_dataset, val_dataset):
     #TOKENIZE DATASET
-    model_name = "facebook/opt-1.3b"  # example open-weight model
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    tokenizer.pad_token = tokenizer.eos_token  # important for causal LM
-    def tokenize(example):
-        return tokenizer(
-            example["text"],
-            truncation=True,
-            max_length=512,  # adjust based on your GPU
-            padding="max_length"
-        )
+    # important for causal LM
+    tokenized_train = train_dataset.map(tokenizer_fn, batched=True)
+    tokenized_val = val_dataset.map(tokenizer_fn, batched=True)
 
-    train_dataset = train_dataset.map(tokenize, batched=True)
-    val_dataset = val_dataset.map(tokenize, batched=True)
+    tokenized_train = tokenized_train.map(lambda x: {"labels": x["input_ids"][:]})
+    tokenized_val = tokenized_val.map(lambda x: {"labels": x["input_ids"][:]})
 
     # SET PYTORCH TENSORS
-    train_dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
-    val_dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
+    tokenized_train.set_format(type="torch", columns=["input_ids", "attention_mask",'labels'])
+    tokenized_val.set_format(type="torch", columns=["input_ids", "attention_mask",'labels'])
 
-    return train_dataset, val_dataset
+    return tokenized_train, tokenized_val
+
+train_dataset, val_dataset = load_cnn_dailymail(1000,200)
+tokenized_train, tokenized_val = tokenize_dataset(load_cnn_dailymail(1000,200)[0],load_cnn_dailymail(1000,200)[1])
+print(len(tokenized_val))
+# Check if there is null values
+# for column in train_dataset.column_names:
+#     null_count = sum([1 for x in train_dataset[column] if x is None])
+#     print(f"{column}: {null_count} null values")
+
+# Save in raw_data
+# train_dataset.save_to_disk("./r_data/r_train")
+# val_dataset.save_to_disk("./r_data/r_val")
+
+# # # Save in tokenized_data
+# tokenized_train.save_to_disk("./t_data/tokenized_train")
+# tokenized_val.save_to_disk("./t_data/tokenized_val")
+
