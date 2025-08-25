@@ -7,6 +7,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from evaluate import load
 import evaluate
 import numpy as np
+import pandas as pd
 
 # Load validation dataset
 tokenized_val = load_from_disk("./t_data/tokenized_val")
@@ -28,7 +29,7 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 
 # Load PEFT / LoRA adapters
-ft_model = PeftModel.from_pretrained(model, MODEL_PATH)
+# ft_model = PeftModel.from_pretrained(model, MODEL_PATH)
 model.eval()
 
 # Evaluation function
@@ -56,8 +57,6 @@ def evaluate_model(model, t_dataset, r_dataset, tokenizer):
         pred = tokenizer.decode(outputs[0], skip_special_tokens=True)
         pred = pred.split("Response:\n")[1].strip() if "Response:\n" in pred else ""
         print(f"PREDICTION: {len(pred)}")
-        # print(f"PREDICTION: {len(pred)}")
-        # print(f"PREDICTION WITHOUT INPUT with {len(pred)}: {pred[1]}")
 
         r_sample = r_val[i]
         ref = r_sample.get('highlights')
@@ -87,3 +86,7 @@ def evaluate_model(model, t_dataset, r_dataset, tokenizer):
 
 # Run evaluation
 results = evaluate_model(model, tokenized_val, r_val, tokenizer)
+
+df = pd.DataFrame(results)
+print(df)
+df.to_csv("./rouge_scores.csv")
