@@ -7,7 +7,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from evaluate import load
 import evaluate
 import numpy as np
-import pandas as pd
 
 # Load validation dataset
 tokenized_val = load_from_disk("./t_data/tokenized_val")
@@ -22,22 +21,24 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load base model (same as the one you trained on)
 base_model_name = MODEL_NAME  # or your original base model
-model = AutoModelForCausalLM.from_pretrained(
+base_model = AutoModelForCausalLM.from_pretrained(
     base_model_name,
     device_map={"": device},        # automatically put layers on GPU
     torch_dtype="auto"        # or torch.float16
 )
 
 # Load PEFT / LoRA adapters
-# ft_model = PeftModel.from_pretrained(model, MODEL_PATH)
-model.eval()
+ft_model = PeftModel.from_pretrained(model, MODEL_PATH)
+# base_model.eval()
+ft_model.eval()
 
 # Evaluation function
 def evaluate_model(model, t_dataset, r_dataset, tokenizer):
-
+    print(f'Evaluating for model {model}')
     res = []
+    print(len(r_dataset))
 
-    for i in range(len(t_dataset)):
+    for i in range(len(r_dataset)):
         # print(f"Prompt: {r_val[i]['text']}")
         # print(f"Human-generated summary: {r_val[i]['text'].split('Response:\n')[1]}")
         t_sample = tokenized_val[i]
@@ -57,6 +58,8 @@ def evaluate_model(model, t_dataset, r_dataset, tokenizer):
         pred = tokenizer.decode(outputs[0], skip_special_tokens=True)
         pred = pred.split("Response:\n")[1].strip() if "Response:\n" in pred else ""
         print(f"PREDICTION: {len(pred)}")
+        # print(f"PREDICTION: {len(pred)}")
+        # print(f"PREDICTION WITHOUT INPUT with {len(pred)}: {pred[1]}")
 
         r_sample = r_val[i]
         ref = r_sample.get('highlights')
@@ -64,7 +67,7 @@ def evaluate_model(model, t_dataset, r_dataset, tokenizer):
         print(f'ref length: {len(ref)}')
 
         if len(pred) == 0 or len(ref) == 0:
-          print("No predictions or references to compute ROUGE.")    
+          print("No predictions or references to compute ROUGE.")
           res.append({
               'rouge1': np.float64(0.0),
               'rouge2': np.float64(0.0),
@@ -75,18 +78,14 @@ def evaluate_model(model, t_dataset, r_dataset, tokenizer):
 
         print("Calculating rouge scores...")
         rouge = evaluate.load('rouge')
-        results = rouge.compute(predictions=pred,
-                            references=ref[:len(pred)],
+        results = rouge.compute(predictions=[pred],
+                            references=[ref],#[:len(pred)],
                             tokenizer=lambda x: x.split(),
                             use_aggregator=True,
                             use_stemmer=True)
         res.append(results)
-
-        return res
+    return res
 
 # Run evaluation
-results = evaluate_model(model, tokenized_val, r_val, tokenizer)
-
-df = pd.DataFrame(results)
-print(df)
-df.to_csv("./rouge_scores.csv")
+# results = evaluate_model(base_model, tokenized_val, r_val, tokenizer)
+# results = evaluate_model(ft_model, tokenized_val, r_val, tokenizer)
