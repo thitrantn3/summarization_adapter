@@ -127,20 +127,20 @@ def evaluate_model(model, t_dataset, r_dataset, tokenizer):
 # Run evaluation
 predictions, r_results, bl_results, be_results = evaluate_model(ft_model, tokenized_val, r_val, tokenizer)
 
-# Save rouge_score/predictions
+# Save rouge_score
 rouge_df = pd.DataFrame(r_results)
 print(f'Saving predictions of length {len(rouge_df)}')
-rouge_df.to_csv('./eval_results/rouge_score/rouge_peft.csv')
+rouge_df.to_csv('./eval_results/scores/rouge_peft.csv')
 
-# Save rouge_score/predictions
+# Save bleu_score
 bleu_df = pd.DataFrame(bl_results)
 print(f'Saving predictions of length {len(bleu_df)}')
-bleu_df.to_csv('./eval_results/rouge_score/bleu_peft.csv')
+bleu_df.to_csv('./eval_results/scores/bleu_peft.csv')
 
-# Save bert_score/predictions
+# Save bert_score
 bert_df = pd.DataFrame(be_results)
 print(f'Saving predictions of length {len(bert_df)}')
-bert_df.to_csv('./eval_results/rouge_score/bert_peft.csv')
+bert_df.to_csv('./eval_results/scores/bert_peft.csv')
 
 # Save the predicted summary
 pred_df = pd.DataFrame()
