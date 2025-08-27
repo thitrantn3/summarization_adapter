@@ -3,8 +3,7 @@
 This project fine-tunes the Qwen 2.5-3B large language model (LLM) for the text summarization task using the CNN-Daily Mail dataset. I will employ the Low-Rank Adaptation (LoRA) method, a parameter-efficient fine-tuning (PEFT) technique.
 
 Getting Started
-Install all required libraries from the requirements.txt file.
-
+<br>Install all required libraries from the requirements.txt file.
 
 Project Workflow
 Follow these steps in order to prepare data, train the model, and evaluate its performance.
