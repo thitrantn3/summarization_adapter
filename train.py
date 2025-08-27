@@ -12,19 +12,16 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME,token=APITOKEN, max_length=
 early_stopping_patience = 3
 early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=early_stopping_patience)
 
-# Load datasets
 print('Loading datasets....')
 train_dataset = load_from_disk("./t_data/tokenized_train")
 val_dataset = load_from_disk("./t_data/tokenized_val")
 print(f'Loaded dataset of length: {len(train_dataset)}')
 
-# Load LoRA model
 print('Loading LORA Model....')
 peft_model = get_lora_model()
 batch_size = 1
 
 print('Define PEFT training arguments....')
-# Define PEFT training arguments
 peft_training_args = TrainingArguments(
     output_dir="./qwen-lora",
     per_device_train_batch_size=batch_size,
@@ -46,7 +43,6 @@ peft_training_args = TrainingArguments(
 )
 
 print('Initialize PEFT trainer...')
-# Initialize PEFT trainer
 peft_trainer = Trainer(
     model=peft_model,
     args=peft_training_args,
@@ -56,11 +52,9 @@ peft_trainer = Trainer(
 )
 
 print('Training PEFT model...')
-# Train PEFT model
 peft_trainer.train()
 peft_model_path="./peft-text-summary"
 
 print('Saving model to local directory...')
-# Saving model to local directory
 peft_trainer.model.save_pretrained(peft_model_path)
 tokenizer.save_pretrained(peft_model_path)
