@@ -5,7 +5,6 @@ from config import MODEL_NAME, MAX_LENGTH, APITOKEN
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME,token=APITOKEN, max_length=512, padding="max_length", truncation=True)
 tokenizer.pad_token = tokenizer.eos_token
 
-
 def load_cnn_dailymail(num_train=1000, num_val=200):
     dataset = load_dataset("cnn_dailymail", "3.0.0")
 
