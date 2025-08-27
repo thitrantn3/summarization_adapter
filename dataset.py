@@ -14,11 +14,11 @@ def load_cnn_dailymail(num_train=1000, num_val=200):
 
     #CREATE PROMPT
     def make_prompt(example):
-        instruction = "Summarize the following article."
+        instruction = "Summarize the following text:"
         input_text = example["article"]
         output_text = example["highlights"]
-        
-        prompt = f"{instruction}\n\n{input_text}\n\n### Response:\n{output_text}"
+
+        prompt = f"{instruction}\n\n{input_text}\n\n### Summary:\n{output_text}"
         return {"text": prompt}
 
     train_dataset = train_dataset.map(make_prompt)
@@ -27,14 +27,12 @@ def load_cnn_dailymail(num_train=1000, num_val=200):
 
 def tokenizer_fn(examples):
     # For causal LM, labels are same as input_ids
-    # examples["labels"] = examples["text"].copy()
     examples = tokenizer(examples['text'], truncation=True, padding="max_length", max_length=512)
 
     return examples
 
 def tokenize_dataset(train_dataset, val_dataset):
     #TOKENIZE DATASET
-    # important for causal LM
     tokenized_train = train_dataset.map(tokenizer_fn, batched=True)
     tokenized_val = val_dataset.map(tokenizer_fn, batched=True)
 
@@ -49,17 +47,12 @@ def tokenize_dataset(train_dataset, val_dataset):
 
 train_dataset, val_dataset = load_cnn_dailymail(1000,200)
 tokenized_train, tokenized_val = tokenize_dataset(load_cnn_dailymail(1000,200)[0],load_cnn_dailymail(1000,200)[1])
-print(len(tokenized_val))
-# Check if there is null values
-# for column in train_dataset.column_names:
-#     null_count = sum([1 for x in train_dataset[column] if x is None])
-#     print(f"{column}: {null_count} null values")
 
 # Save in raw_data
-# train_dataset.save_to_disk("./r_data/r_train")
-# val_dataset.save_to_disk("./r_data/r_val")
+train_dataset.to_csv("./r_data/r_train.csv")
+val_dataset.to_csv("./r_data/r_val.csv")
 
-# # # Save in tokenized_data
-# tokenized_train.save_to_disk("./t_data/tokenized_train")
-# tokenized_val.save_to_disk("./t_data/tokenized_val")
+# Save in tokenized_data
+tokenized_train.save_to_disk("./t_data/tokenized_train")
+tokenized_val.save_to_disk("./t_data/tokenized_val")
 
