@@ -58,7 +58,7 @@ peft_trainer = Trainer(
 print('Training PEFT model...')
 # Train PEFT model
 peft_trainer.train()
-peft_model_path="./peft-text-summary-6.0"
+peft_model_path="./peft-text-summary"
 
 print('Saving model to local directory...')
 # Saving model to local directory
