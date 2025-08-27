@@ -1,4 +1,5 @@
-LoRA Fine-Tuning for CNN-Daily Mail with Qwen 2.5-3B
+#LoRA Fine-Tuning for CNN-Daily Mail with Qwen 2.5-3B
+
 This project fine-tunes the Qwen 2.5-3B large language model (LLM) for the text summarization task using the CNN-Daily Mail dataset. I will employ the Low-Rank Adaptation (LoRA) method, a parameter-efficient fine-tuning (PEFT) technique.
 
 Getting Started
