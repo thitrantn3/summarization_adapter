@@ -13,7 +13,7 @@ Project Workflow
 Follow these steps in order to prepare your data, train the model, and evaluate its performance.
 
 1. Prepare Data with dataset.py
-Run python dataset.py to load, process, and tokenize the raw CNN-Daily Mail data. It separates articles and summaries into "input_texts" and "labels" columns, which is the required format for training a summarization model.
+\nRun python dataset.py to load, process, and tokenize the raw CNN-Daily Mail data. It separates articles and summaries into "input_texts" and "labels" columns, which is the required format for training a summarization model.
 
 2. Train the Model with train.py
 Execute python train.py to begin fine-tuning. It loads the Qwen 2.5-3B model and trains the LoRA adapter on your prepared dataset. The process is memory-efficient and includes early stopping to prevent overfitting.
