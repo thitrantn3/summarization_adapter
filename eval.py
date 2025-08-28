@@ -101,7 +101,6 @@ def evaluate_model(model, t_dataset, r_dataset, tokenizer):
             )
         pred = tokenizer.decode(outputs[0], skip_special_tokens=True)
         pred = pred.split("Summary:\n")[1].strip() if "Summary:\n" in pred else ""
-        print(f"PREDICTION: {len(pred)}")
 
         predictions.append(pred)
 
