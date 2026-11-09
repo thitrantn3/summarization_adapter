@@ -58,6 +58,15 @@ def parse_args():
     ap.add_argument("--epochs", type=float, default=1)
     ap.add_argument("--lr", type=float, default=5e-6)
     ap.add_argument("--beta", type=float, default=0.1)
+    # Speed knobs
+    ap.add_argument("--batch_size", type=int, default=1, help="per-device batch; raise on A100/L4")
+    ap.add_argument("--grad_accum", type=int, default=8, help="effective batch = batch_size * grad_accum")
+    ap.add_argument("--no_grad_ckpt", action="store_true",
+                    help="disable gradient checkpointing (~30%% faster, needs more VRAM: A100/L4)")
+    ap.add_argument("--eval_steps", type=int, default=200, help="eval + checkpoint every N steps")
+    ap.add_argument("--max_val", type=int, default=200, help="cap eval pairs (each eval runs all of them)")
+    ap.add_argument("--output_dir", default=DPO_PATH, help="where the final DPO adapter is saved")
+    ap.add_argument("--ckpt_dir", default="./qwen-dpo", help="intermediate trainer checkpoints")
     return ap.parse_args()
 
 
@@ -90,6 +99,8 @@ def load_preference_data(cli):
     if "val" not in data:
         split = data["train"].train_test_split(test_size=cli.val_frac, seed=42)
         data = DatasetDict(train=split["train"], val=split["test"])
+    if cli.max_val and len(data["val"]) > cli.max_val:
+        data["val"] = data["val"].shuffle(seed=42).select(range(cli.max_val))
     return data
 
 
@@ -119,12 +130,12 @@ def main():
     )
 
     # 10% warmup as an absolute step count: newer transformers removed warmup_ratio
-    batch_size, grad_accum = 1, 8
+    batch_size, grad_accum = cli.batch_size, cli.grad_accum
     total_steps = math.ceil(len(data["train"]) / (batch_size * grad_accum) * cli.epochs)
     warmup_steps = max(1, math.ceil(0.1 * total_steps))
 
     args = DPOConfig(
-        output_dir="./qwen-dpo",
+        output_dir=cli.ckpt_dir,
         beta=cli.beta,                     # strength of KL pull toward SFT model
         learning_rate=cli.lr,
         lr_scheduler_type="cosine",
@@ -133,16 +144,16 @@ def main():
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
         gradient_accumulation_steps=grad_accum,
-        gradient_checkpointing=True,
+        gradient_checkpointing=not cli.no_grad_ckpt,
         max_length=1024,                # doc-sum DPO: prompt ~300 + chosen ~300 tokens
         bf16=use_bf16,
         fp16=(device.type == "cuda" and not use_bf16),  # e.g. Colab T4
         gradient_checkpointing_kwargs={"use_reentrant": False},
         logging_steps=10,
         eval_strategy="steps",
-        eval_steps=50,
+        eval_steps=cli.eval_steps,
         save_strategy="steps",
-        save_steps=50,
+        save_steps=cli.eval_steps,      # must align with eval for load_best_model_at_end
         save_total_limit=2,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
@@ -163,9 +174,9 @@ def main():
     print("Training DPO...")
     trainer.train()
 
-    print(f"Saving DPO adapter to {DPO_PATH}")
-    trainer.model.save_pretrained(DPO_PATH)
-    tokenizer.save_pretrained(DPO_PATH)
+    print(f"Saving DPO adapter to {cli.output_dir}")
+    trainer.model.save_pretrained(cli.output_dir)
+    tokenizer.save_pretrained(cli.output_dir)
 
 
 if __name__ == "__main__":
