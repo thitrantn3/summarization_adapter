@@ -39,3 +39,14 @@ def get_lora_model():
 # peft_model = get_lora_model()
 # for name, param in peft_model.named_parameters():
 #     print(name, param.requires_grad)
+
+def load_dpo_model(sft_path="./peft-text-summary", dpo_path="./dpo-text-summary"):
+    """Base model + merged SFT adapter + DPO adapter (for inference/eval)."""
+    from peft import PeftModel
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    base = AutoModelForCausalLM.from_pretrained(MODEL_NAME, torch_dtype="auto", token=APITOKEN).to(device)
+    sft = PeftModel.from_pretrained(base, sft_path).merge_and_unload()
+    model = PeftModel.from_pretrained(sft, dpo_path)
+    model.eval()
+    tokenizer = AutoTokenizer.from_pretrained(dpo_path)
+    return model, tokenizer

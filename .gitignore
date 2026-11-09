@@ -1,0 +1,6 @@
+.DS_Store
+__pycache__/
+dpo_data/
+qwen-dpo/
+qwen-lora/
+dpo-text-summary/
