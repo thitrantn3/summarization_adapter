@@ -14,6 +14,7 @@ model.load_dpo_model() to load it for inference.
 Data: your own preference file (see --help), or the output of make_dpo_data.py.
 """
 import argparse
+import math
 import os
 
 import torch
@@ -32,7 +33,9 @@ PROMPT_TEMPLATE = "Summarize the following text:\n\n{article}\n\n### Summary:\n"
 
 def get_device_and_dtype():
     if torch.cuda.is_available():
-        bf16 = torch.cuda.is_bf16_supported()
+        # Native bf16 needs Ampere+ (sm_80). is_bf16_supported() also returns True on
+        # T4 (sm_75) via emulation, but bf16 matmuls then fail -> use fp16 there.
+        bf16 = torch.cuda.get_device_capability()[0] >= 8
         return torch.device("cuda"), (torch.bfloat16 if bf16 else torch.float16), bf16
     if torch.backends.mps.is_available():
         return torch.device("mps"), torch.float32, False
@@ -41,9 +44,11 @@ def get_device_and_dtype():
 
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--train_file", default="./dpo_data/train.jsonl",
+    # Defaults match load_hf_dpo_data.py's --out_dir
+    ap.add_argument("--train_file", default="./dpo_data/doc_sum/train.jsonl",
                     help=".jsonl / .json / .csv / .parquet with prompt, chosen, rejected")
-    ap.add_argument("--val_file", default=None, help="optional; otherwise split from train")
+    ap.add_argument("--val_file", default="./dpo_data/doc_sum/val.jsonl",
+                    help="optional; if missing, split from train")
     ap.add_argument("--val_frac", type=float, default=0.1)
     ap.add_argument("--prompt_col", default="prompt")
     ap.add_argument("--chosen_col", default="chosen")
@@ -62,8 +67,14 @@ def _loader(path):
 
 
 def load_preference_data(cli):
+    if not os.path.isfile(cli.train_file):
+        raise SystemExit(
+            f"Training file not found: {os.path.abspath(cli.train_file)}\n"
+            f"(working directory: {os.getcwd()})\n"
+            "Run load_hf_dpo_data.py first, or pass --train_file, and run from the repo root."
+        )
     files = {"train": cli.train_file}
-    if cli.val_file:
+    if cli.val_file and os.path.isfile(cli.val_file):
         files["val"] = cli.val_file
     data = load_dataset(_loader(cli.train_file), data_files=files)
 
@@ -87,6 +98,9 @@ def main():
     device, dtype, use_bf16 = get_device_and_dtype()
     print(f"device: {device}, dtype: {dtype}")
 
+    data = load_preference_data(cli)
+    print(f"train pairs: {len(data['train'])}, val pairs: {len(data['val'])}")
+
     tokenizer = AutoTokenizer.from_pretrained(SFT_PATH)
     tokenizer.pad_token = tokenizer.eos_token
 
@@ -94,9 +108,6 @@ def main():
     base = AutoModelForCausalLM.from_pretrained(MODEL_NAME, torch_dtype=dtype).to(device)
     model = PeftModel.from_pretrained(base, SFT_PATH).merge_and_unload()
     model.config.use_cache = False
-
-    data = load_preference_data(cli)
-    print(f"train pairs: {len(data['train'])}, val pairs: {len(data['val'])}")
 
     peft_config = LoraConfig(
         r=16,
@@ -107,16 +118,21 @@ def main():
         task_type="CAUSAL_LM",
     )
 
+    # 10% warmup as an absolute step count: newer transformers removed warmup_ratio
+    batch_size, grad_accum = 1, 8
+    total_steps = math.ceil(len(data["train"]) / (batch_size * grad_accum) * cli.epochs)
+    warmup_steps = max(1, math.ceil(0.1 * total_steps))
+
     args = DPOConfig(
         output_dir="./qwen-dpo",
         beta=cli.beta,                     # strength of KL pull toward SFT model
         learning_rate=cli.lr,
         lr_scheduler_type="cosine",
-        warmup_ratio=0.1,
+        warmup_steps=warmup_steps,
         num_train_epochs=cli.epochs,
-        per_device_train_batch_size=1,
-        per_device_eval_batch_size=1,
-        gradient_accumulation_steps=8,
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size,
+        gradient_accumulation_steps=grad_accum,
         gradient_checkpointing=True,
         max_length=1024,                # doc-sum DPO: prompt ~300 + chosen ~300 tokens
         bf16=use_bf16,
