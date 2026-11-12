@@ -32,25 +32,37 @@ esac
 
 IMAGE="us-docker.pkg.dev/vertex-ai/training/pytorch-gpu.2-4.py310:latest"
 
-JOB_SCRIPT="set -euxo pipefail
+# Runs inside the job container. \$ = expanded at runtime; plain $ = filled in now.
+# Telegram (optional): set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID when submitting.
+JOB_SCRIPT="set -euo pipefail
+exec > >(tee /tmp/job.log) 2>&1
+notify() { [ -f /app/vertex/notify.py ] && python3 /app/vertex/notify.py \"\$1\" || true; }
+trap 'exit 143' TERM
+trap 'rc=\$?; [ \$rc -ne 0 ] && notify \"❌ ${RUN} failed or was cancelled (exit \$rc, ${REGION}). Last log lines:
+\$(tail -n 15 /tmp/job.log)\"' EXIT
+set -x
 command -v git >/dev/null || (apt-get update -qq && apt-get install -y -qq git)
 git clone -q -b ${BRANCH} ${REPO} /app && cd /app
+notify \"🚀 ${RUN} started on ${GPU} in ${REGION} (NUM=${NUM}, epochs=${EPOCHS})\"
 pip install -q -U 'trl>=0.19' peft accelerate datasets rouge-score evaluate
 pip uninstall -q -y torchao || true
 python load_hf_dpo_data.py --num ${NUM} --out_dir dpo_data/doc_sum
 python train_dpo.py --epochs ${EPOCHS} ${SPEED_ARGS} ${EXTRA_ARGS:-} \
   --ckpt_dir /tmp/qwen-dpo --output_dir ${OUT}/dpo-text-summary
-echo done > ${OUT}/_SUCCESS"
+echo done > ${OUT}/_SUCCESS
+notify \"✅ ${RUN} finished. Adapter: gs://${BUCKET}/dpo-runs/${RUN}/dpo-text-summary\""
 
 CONFIG="$(mktemp -t vertex-dpo).yaml"
 python3 - "$CONFIG" "$MACHINE" "$ACCEL" "$IMAGE" "$JOB_SCRIPT" <<'EOF'
-import json, sys
+import json, os, sys
 path, machine, accel, image, script = sys.argv[1:]
+env = [{"name": k, "value": os.environ[k]}
+       for k in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID") if os.environ.get(k)]
 spec = {"workerPoolSpecs": [{
     "machineSpec": {"machineType": machine, "acceleratorType": accel, "acceleratorCount": 1},
     "replicaCount": 1,
     "diskSpec": {"bootDiskType": "pd-ssd", "bootDiskSizeGb": 100},
-    "containerSpec": {"imageUri": image, "command": ["bash", "-c"], "args": [script]},
+    "containerSpec": {"imageUri": image, "command": ["bash", "-c"], "args": [script], "env": env},
 }]}
 json.dump(spec, open(path, "w"), indent=2)  # JSON is valid YAML
 EOF
@@ -59,7 +71,7 @@ echo "Submitting $RUN ($GPU, NUM=$NUM) -> gs://${BUCKET}/dpo-runs/${RUN}"
 gcloud ai custom-jobs create \
   --project="$PROJECT" --region="$REGION" \
   --display-name="$RUN" --config="$CONFIG"
-
+python3 "$(dirname "$0")/notify.py" "⏳ ${RUN} submitted to ${REGION}, waiting for a ${GPU} GPU"
 echo
 echo "Logs:     gcloud ai custom-jobs stream-logs <JOB_ID> --project=$PROJECT --region=$REGION"
 echo "Download: gcloud storage cp -r gs://${BUCKET}/dpo-runs/${RUN}/dpo-text-summary ."
