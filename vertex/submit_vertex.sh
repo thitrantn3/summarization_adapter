@@ -44,7 +44,10 @@ set -x
 command -v git >/dev/null || (apt-get update -qq && apt-get install -y -qq git)
 git clone -q -b ${BRANCH} ${REPO} /app && cd /app
 notify \"🚀 ${RUN} started on ${GPU} in ${REGION} (NUM=${NUM}, epochs=${EPOCHS})\"
+# Image ships torch 2.4; current transformers needs >=2.6. cu124 matches the image's CUDA.
+pip install -q 'torch>=2.6,<2.7' --index-url https://download.pytorch.org/whl/cu124
 pip install -q -U 'trl>=0.19' peft accelerate datasets rouge-score evaluate
+python -c 'import torch, transformers; print(\"torch\", torch.__version__, \"cuda\", torch.cuda.is_available(), \"transformers\", transformers.__version__)'
 pip uninstall -q -y torchao || true
 python load_hf_dpo_data.py --num ${NUM} --out_dir dpo_data/doc_sum
 python train_dpo.py --epochs ${EPOCHS} ${SPEED_ARGS} ${EXTRA_ARGS:-} \
