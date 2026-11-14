@@ -12,6 +12,11 @@
 # gs://$BUCKET/dpo-runs/<ADAPTER_RUN>/eval-<time>/. NUM must match the training run
 # so the held-out val split is the same one training never saw.
 #   MODE=eval ADAPTER_RUN=dpo-20261112-211044 PROJECT=... BUCKET=... ./vertex/submit_vertex.sh
+#
+# Summarize your own documents with a trained adapter (summarize_dpo.py). INPUT is a
+# local .csv/.jsonl (`text` column, optional `instruction`) or .txt (docs split by ---);
+# it's uploaded, and summaries go to gs://$BUCKET/inference/<run>/summaries.csv.
+#   MODE=infer INPUT=docs.csv ADAPTER_RUN=dpo-20261112-211044 PROJECT=... BUCKET=... ./vertex/submit_vertex.sh
 set -euo pipefail
 
 : "${PROJECT:?set PROJECT (GCP project id)}"
@@ -34,7 +39,19 @@ case "$MODE" in
          OUT="/gcs/${BUCKET}/dpo-runs/${ADAPTER_RUN}/${RUN}"
          gcloud storage ls "gs://${ADAPTER#/gcs/}/adapter_model.safetensors" >/dev/null \
            || { echo "No adapter at gs://${ADAPTER#/gcs/}" >&2; exit 1; } ;;
-  *) echo "MODE must be train or eval" >&2; exit 1 ;;
+  infer) : "${ADAPTER_RUN:?set ADAPTER_RUN to a finished training run, e.g. dpo-20261112-211044}"
+         : "${INPUT:?set INPUT to a local .csv, .jsonl or .txt file of documents}"
+         [ -f "$INPUT" ] || { echo "INPUT file not found: $INPUT" >&2; exit 1; }
+         case "$INPUT" in *.csv|*.jsonl|*.txt) ;; *) echo "INPUT must be .csv, .jsonl or .txt" >&2; exit 1 ;; esac
+         RUN="infer-${STAMP}"
+         ADAPTER="/gcs/${BUCKET}/dpo-runs/${ADAPTER_RUN}/dpo-text-summary"
+         OUT="/gcs/${BUCKET}/inference/${RUN}"
+         INFER_MODEL="${INFER_MODEL:-dpo}"
+         IN_NAME="input.${INPUT##*.}"
+         gcloud storage ls "gs://${ADAPTER#/gcs/}/adapter_model.safetensors" >/dev/null \
+           || { echo "No adapter at gs://${ADAPTER#/gcs/}" >&2; exit 1; }
+         gcloud storage cp "$INPUT" "gs://${OUT#/gcs/}/${IN_NAME}" ;;
+  *) echo "MODE must be train, eval or infer" >&2; exit 1 ;;
 esac
 
 case "$GPU" in
@@ -69,14 +86,17 @@ pip install -q -U -c /tmp/torch-pins.txt 'trl>=0.19' peft accelerate datasets ro
 # Fail fast (before the 6 GB model download) if the stack doesn't import together
 python -c 'import torch, transformers, peft, trl; from transformers import AutoModelForCausalLM; from trl import DPOTrainer; print(\"torch\", torch.__version__, \"cuda\", torch.cuda.is_available(), \"transformers\", transformers.__version__, \"peft\", peft.__version__, \"trl\", trl.__version__)'
 pip uninstall -q -y torchao || true
-python load_hf_dpo_data.py --num ${NUM} --out_dir dpo_data/doc_sum
 "
+if [ "$MODE" != infer ]; then
+JOB_SCRIPT+="python load_hf_dpo_data.py --num ${NUM} --out_dir dpo_data/doc_sum
+"
+fi
 if [ "$MODE" = train ]; then
 JOB_SCRIPT+="python train_dpo.py --epochs ${EPOCHS} ${SPEED_ARGS} ${EXTRA_ARGS:-} \
   --ckpt_dir /tmp/qwen-dpo --output_dir ${OUT}/dpo-text-summary
 echo done > ${OUT}/_SUCCESS
 notify \"✅ ${RUN} finished. Adapter: gs://${BUCKET}/dpo-runs/${RUN}/dpo-text-summary\""
-else
+elif [ "$MODE" = eval ]; then
 JOB_SCRIPT+="cp -r ${ADAPTER} /app/dpo-text-summary
 mkdir -p ${OUT}
 # DPO first (the one we care about); each model's CSV is saved as soon as it's done
@@ -91,6 +111,13 @@ echo done > ${OUT}/_SUCCESS
 notify \"✅ ${RUN} finished (${ADAPTER_RUN}, ${EVAL_NUM} prompts):
 \$(cat results/summary.txt)
 Results: gs://${OUT#/gcs/}\""
+elif [ "$MODE" = infer ]; then
+JOB_SCRIPT+="cp -r ${ADAPTER} /app/dpo-text-summary
+python summarize_dpo.py --model ${INFER_MODEL} --input ${OUT}/${IN_NAME} --output ${OUT}/summaries.csv
+echo done > ${OUT}/_SUCCESS
+notify \"✅ ${RUN} finished (${INFER_MODEL} model, ${ADAPTER_RUN}).
+\$(grep -o 'wrote [0-9]* summaries' /tmp/job.log | tail -n 1)
+Results: gs://${OUT#/gcs/}/summaries.csv\""
 fi
 
 CONFIG="$(mktemp -t vertex-dpo).yaml"
@@ -117,6 +144,8 @@ echo
 echo "Logs:     gcloud ai custom-jobs stream-logs <JOB_ID> --project=$PROJECT --region=$REGION"
 if [ "$MODE" = train ]; then
   echo "Download: gcloud storage cp -r gs://${OUT#/gcs/}/dpo-text-summary ."
-else
+elif [ "$MODE" = eval ]; then
   echo "Results:  gcloud storage cp -r gs://${OUT#/gcs/} results/"
+else
+  echo "Results:  gcloud storage cp gs://${OUT#/gcs/}/summaries.csv ."
 fi
