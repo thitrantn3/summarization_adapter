@@ -13,10 +13,12 @@
 # so the held-out val split is the same one training never saw.
 #   MODE=eval ADAPTER_RUN=dpo-20261112-211044 PROJECT=... BUCKET=... ./vertex/submit_vertex.sh
 #
-# Summarize your own documents with a trained adapter (summarize_dpo.py). INPUT is a
-# local .csv/.jsonl (`text` column, optional `instruction`) or .txt (docs split by ---);
-# it's uploaded, and summaries go to gs://$BUCKET/inference/<run>/summaries.csv.
+# Summarize your own documents with a trained adapter (summarize_dpo.py). INPUT is one or
+# more comma-separated local .csv/.jsonl (`text` column, optional `instruction`) or .txt
+# (docs split by ---) files; each is uploaded and gets gs://$BUCKET/inference/<run>/summaries-<name>.csv.
+# INFER_MODEL picks the model(s), side by side in the same CSV (default dpo).
 #   MODE=infer INPUT=docs.csv ADAPTER_RUN=dpo-20261112-211044 PROJECT=... BUCKET=... ./vertex/submit_vertex.sh
+#   MODE=infer INPUT=a.jsonl,b.jsonl INFER_MODEL=base,sft,dpo ADAPTER_RUN=... PROJECT=... BUCKET=... ./vertex/submit_vertex.sh
 set -euo pipefail
 
 : "${PROJECT:?set PROJECT (GCP project id)}"
@@ -40,17 +42,34 @@ case "$MODE" in
          gcloud storage ls "gs://${ADAPTER#/gcs/}/adapter_model.safetensors" >/dev/null \
            || { echo "No adapter at gs://${ADAPTER#/gcs/}" >&2; exit 1; } ;;
   infer) : "${ADAPTER_RUN:?set ADAPTER_RUN to a finished training run, e.g. dpo-20261112-211044}"
-         : "${INPUT:?set INPUT to a local .csv, .jsonl or .txt file of documents}"
-         [ -f "$INPUT" ] || { echo "INPUT file not found: $INPUT" >&2; exit 1; }
-         case "$INPUT" in *.csv|*.jsonl|*.txt) ;; *) echo "INPUT must be .csv, .jsonl or .txt" >&2; exit 1 ;; esac
+         : "${INPUT:?set INPUT to local .csv, .jsonl or .txt file(s) of documents, comma-separated}"
+         IFS=, read -r -a INPUTS <<< "$INPUT"
+         SEEN=","
+         for f in "${INPUTS[@]}"; do
+           [ -f "$f" ] || { echo "INPUT file not found: $f" >&2; exit 1; }
+           case "$f" in *.csv|*.jsonl|*.txt) ;; *) echo "INPUT must be .csv, .jsonl or .txt: $f" >&2; exit 1 ;; esac
+           b="$(basename "$f")"
+           case "$SEEN" in *",$b,"*) echo "Two INPUT files share the name $b; rename one" >&2; exit 1 ;; esac
+           SEEN+="$b,"
+         done
          RUN="infer-${STAMP}"
          ADAPTER="/gcs/${BUCKET}/dpo-runs/${ADAPTER_RUN}/dpo-text-summary"
          OUT="/gcs/${BUCKET}/inference/${RUN}"
          INFER_MODEL="${INFER_MODEL:-dpo}"
-         IN_NAME="input.${INPUT##*.}"
+         for m in ${INFER_MODEL//,/ }; do
+           case "$m" in base|sft|dpo) ;; *) echo "INFER_MODEL must be from base,sft,dpo: $m" >&2; exit 1 ;; esac
+         done
          gcloud storage ls "gs://${ADAPTER#/gcs/}/adapter_model.safetensors" >/dev/null \
            || { echo "No adapter at gs://${ADAPTER#/gcs/}" >&2; exit 1; }
-         gcloud storage cp "$INPUT" "gs://${OUT#/gcs/}/${IN_NAME}" ;;
+         INFER_CMDS=""; OUTPUTS=""
+         for f in "${INPUTS[@]}"; do
+           b="$(basename "$f")"; stem="${b%.*}"
+           gcloud storage cp "$f" "gs://${OUT#/gcs/}/inputs/${b}"
+           INFER_CMDS+="python summarize_dpo.py --model ${INFER_MODEL} --input ${OUT}/inputs/${b} --output ${OUT}/summaries-${stem}.csv
+"
+           OUTPUTS+="gs://${OUT#/gcs/}/summaries-${stem}.csv
+"
+         done ;;
   *) echo "MODE must be train, eval or infer" >&2; exit 1 ;;
 esac
 
@@ -113,11 +132,11 @@ notify \"✅ ${RUN} finished (${ADAPTER_RUN}, ${EVAL_NUM} prompts):
 Results: gs://${OUT#/gcs/}\""
 elif [ "$MODE" = infer ]; then
 JOB_SCRIPT+="cp -r ${ADAPTER} /app/dpo-text-summary
-python summarize_dpo.py --model ${INFER_MODEL} --input ${OUT}/${IN_NAME} --output ${OUT}/summaries.csv
-echo done > ${OUT}/_SUCCESS
-notify \"✅ ${RUN} finished (${INFER_MODEL} model, ${ADAPTER_RUN}).
-\$(grep -o 'wrote [0-9]* summaries' /tmp/job.log | tail -n 1)
-Results: gs://${OUT#/gcs/}/summaries.csv\""
+${INFER_CMDS}echo done > ${OUT}/_SUCCESS
+notify \"✅ ${RUN} finished (models: ${INFER_MODEL}; adapter ${ADAPTER_RUN}).
+\$(grep -o 'wrote [0-9]* summaries x [0-9]* models' /tmp/job.log)
+Results:
+${OUTPUTS}\""
 fi
 
 CONFIG="$(mktemp -t vertex-dpo).yaml"
@@ -147,5 +166,5 @@ if [ "$MODE" = train ]; then
 elif [ "$MODE" = eval ]; then
   echo "Results:  gcloud storage cp -r gs://${OUT#/gcs/} results/"
 else
-  echo "Results:  gcloud storage cp gs://${OUT#/gcs/}/summaries.csv ."
+  echo "Results:  gcloud storage cp \"gs://${OUT#/gcs/}/summaries-*.csv\" results/"
 fi
