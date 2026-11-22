@@ -26,6 +26,8 @@
 #   MODE=sft PROJECT=... BUCKET=... ./vertex/submit_vertex.sh
 set -euo pipefail
 
+# Telegram credentials can live in ~/.telegram.env (outside the repo) instead of the shell
+[ -f "$HOME/.telegram.env" ] && . "$HOME/.telegram.env"
 : "${PROJECT:?set PROJECT (GCP project id)}"
 : "${BUCKET:?set BUCKET (GCS bucket name, no gs://)}"
 MODE="${MODE:-train}"
