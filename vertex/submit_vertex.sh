@@ -19,6 +19,11 @@
 # INFER_MODEL picks the model(s), side by side in the same CSV (default dpo).
 #   MODE=infer INPUT=docs.csv ADAPTER_RUN=dpo-20261112-211044 PROJECT=... BUCKET=... ./vertex/submit_vertex.sh
 #   MODE=infer INPUT=a.jsonl,b.jsonl INFER_MODEL=base,sft,dpo ADAPTER_RUN=... PROJECT=... BUCKET=... ./vertex/submit_vertex.sh
+#
+# SFT on CNN/DailyMail (train.py, settings in config.py, data from the repo's t_data/ and
+# r_data/), then eval.py on the new adapter and on the original one for comparison.
+# Adapter, eval scores/predictions and the loss log go to gs://$BUCKET/sft-runs/<run>/.
+#   MODE=sft PROJECT=... BUCKET=... ./vertex/submit_vertex.sh
 set -euo pipefail
 
 : "${PROJECT:?set PROJECT (GCP project id)}"
@@ -70,7 +75,9 @@ case "$MODE" in
            OUTPUTS+="gs://${OUT#/gcs/}/summaries-${stem}.csv
 "
          done ;;
-  *) echo "MODE must be train, eval or infer" >&2; exit 1 ;;
+  sft)   RUN="sft-${STAMP}"
+         OUT="/gcs/${BUCKET}/sft-runs/${RUN}" ;;
+  *) echo "MODE must be train, eval, infer or sft" >&2; exit 1 ;;
 esac
 
 case "$GPU" in
@@ -106,7 +113,7 @@ pip install -q -U -c /tmp/torch-pins.txt 'trl>=0.19' peft accelerate datasets ro
 python -c 'import torch, transformers, peft, trl; from transformers import AutoModelForCausalLM; from trl import DPOTrainer; print(\"torch\", torch.__version__, \"cuda\", torch.cuda.is_available(), \"transformers\", transformers.__version__, \"peft\", peft.__version__, \"trl\", trl.__version__)'
 pip uninstall -q -y torchao || true
 "
-if [ "$MODE" != infer ]; then
+if [ "$MODE" = train ] || [ "$MODE" = eval ]; then
 JOB_SCRIPT+="python load_hf_dpo_data.py --num ${NUM} --out_dir dpo_data/doc_sum
 "
 fi
@@ -130,6 +137,26 @@ echo done > ${OUT}/_SUCCESS
 notify \"✅ ${RUN} finished (${ADAPTER_RUN}, ${EVAL_NUM} prompts):
 \$(cat results/summary.txt)
 Results: gs://${OUT#/gcs/}\""
+elif [ "$MODE" = sft ]; then
+JOB_SCRIPT+="pip install -q -c /tmp/torch-pins.txt bert_score nltk absl-py
+mkdir -p ${OUT}
+python train.py
+cp -r peft-text-summary-v2 ${OUT}/
+# loss curve: trainer_state.json of the last checkpoint
+st=\$(ls -d qwen-lora/checkpoint-* | sort -V | tail -n 1)/trainer_state.json
+cp \$st ${OUT}/trainer_state.json
+python -c 'import json, sys; s=json.load(open(sys.argv[1])); print(\"best eval_loss\", round(s[\"best_metric\"], 4), \"at\", s[\"best_model_checkpoint\"].split(\"/\")[-1], \"of\", s[\"global_step\"], \"steps\")' \$st | tee /tmp/best.txt
+notify \"🏋️ ${RUN}: SFT trained (\$(cat /tmp/best.txt)). Evaluating v2 and v1...\"
+python eval.py --model_path ./peft-text-summary-v2 --num ${EVAL_NUM} | tee /tmp/eval_v2.txt
+python eval.py --model_path ./peft-text-summary --num ${EVAL_NUM} | tee /tmp/eval_v1.txt
+cp -r eval_results ${OUT}/
+echo done > ${OUT}/_SUCCESS
+notify \"✅ ${RUN} finished. ${EVAL_NUM} CNN/DailyMail val articles:
+NEW (v2):
+\$(tail -n 4 /tmp/eval_v2.txt)
+OLD (v1):
+\$(tail -n 4 /tmp/eval_v1.txt)
+Adapter: gs://${OUT#/gcs/}/peft-text-summary-v2\""
 elif [ "$MODE" = infer ]; then
 JOB_SCRIPT+="cp -r ${ADAPTER} /app/dpo-text-summary
 ${INFER_CMDS}echo done > ${OUT}/_SUCCESS
@@ -164,6 +191,8 @@ echo "Logs:     gcloud ai custom-jobs stream-logs <JOB_ID> --project=$PROJECT --
 if [ "$MODE" = train ]; then
   echo "Download: gcloud storage cp -r gs://${OUT#/gcs/}/dpo-text-summary ."
 elif [ "$MODE" = eval ]; then
+  echo "Results:  gcloud storage cp -r gs://${OUT#/gcs/} results/"
+elif [ "$MODE" = sft ]; then
   echo "Results:  gcloud storage cp -r gs://${OUT#/gcs/} results/"
 else
   echo "Results:  gcloud storage cp \"gs://${OUT#/gcs/}/summaries-*.csv\" results/"

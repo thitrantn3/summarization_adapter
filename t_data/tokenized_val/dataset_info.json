@@ -29,22 +29,6 @@
   },
   "download_size": 837094602,
   "features": {
-    "article": {
-      "dtype": "string",
-      "_type": "Value"
-    },
-    "highlights": {
-      "dtype": "string",
-      "_type": "Value"
-    },
-    "id": {
-      "dtype": "string",
-      "_type": "Value"
-    },
-    "text": {
-      "dtype": "string",
-      "_type": "Value"
-    },
     "input_ids": {
       "feature": {
         "dtype": "int32",

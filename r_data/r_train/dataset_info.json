@@ -41,7 +41,7 @@
       "dtype": "string",
       "_type": "Value"
     },
-    "text": {
+    "prompt": {
       "dtype": "string",
       "_type": "Value"
     }
