@@ -96,11 +96,14 @@ def compare():
 
 p = argparse.ArgumentParser()
 p.add_argument('--model', choices=MODELS)
+p.add_argument('--sft_path', default=SFT_ADAPTER,
+               help='SFT adapter (must be the one the DPO adapter was trained on)')
 p.add_argument('--compare', action='store_true')
 p.add_argument('--data', default='dpo_data/doc_sum/val.jsonl')
 p.add_argument('--num', type=int, default=200, help='number of test prompts (0 = all)')
 p.add_argument('--max_new_tokens', type=int, default=512)
 a = p.parse_args()
+SFT_ADAPTER = a.sft_path
 
 if a.compare:
     compare()

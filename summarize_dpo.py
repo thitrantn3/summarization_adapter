@@ -112,14 +112,18 @@ def write_csv(path, rows):
 
 
 def main():
+    global SFT_ADAPTER  # load_model() reads it
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
     ap.add_argument("--output", required=True, help=".csv")
+    ap.add_argument("--sft_path", default=SFT_ADAPTER,
+                    help="SFT adapter (must be the one the DPO adapter was trained on)")
     ap.add_argument("--model", default="dpo",
                     help="one or more of base,sft,dpo, comma-separated (e.g. base,sft,dpo)")
     ap.add_argument("--batch_size", type=int, default=4)
     ap.add_argument("--max_new_tokens", type=int, default=512)
     a = ap.parse_args()
+    SFT_ADAPTER = a.sft_path
     models = [m.strip() for m in a.model.split(",") if m.strip()]
     bad = [m for m in models if m not in MODELS]
     if bad or not models:

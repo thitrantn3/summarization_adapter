@@ -2,7 +2,7 @@
 DPO fine-tuning on top of the SFT LoRA model.
 
 Approach:
-  1. Load Qwen2.5-3B + SFT adapter (./peft-text-summary) and merge it -> SFT model.
+  1. Load Qwen2.5-3B + SFT adapter (--sft_path, default ./peft-text-summary) and merge it -> SFT model.
   2. Attach a fresh LoRA adapter and train it with DPO.
      With ref_model=None, TRL computes reference log-probs by disabling the
      adapter, so the reference is exactly the frozen SFT model (one copy in memory).
@@ -65,6 +65,7 @@ def parse_args():
                     help="disable gradient checkpointing (~30%% faster, needs more VRAM: A100/L4)")
     ap.add_argument("--eval_steps", type=int, default=200, help="eval + checkpoint every N steps")
     ap.add_argument("--max_val", type=int, default=200, help="cap eval pairs (each eval runs all of them)")
+    ap.add_argument("--sft_path", default=SFT_PATH, help="SFT LoRA adapter to start from")
     ap.add_argument("--output_dir", default=DPO_PATH, help="where the final DPO adapter is saved")
     ap.add_argument("--ckpt_dir", default="./qwen-dpo", help="intermediate trainer checkpoints")
     return ap.parse_args()
@@ -112,12 +113,13 @@ def main():
     data = load_preference_data(cli)
     print(f"train pairs: {len(data['train'])}, val pairs: {len(data['val'])}")
 
-    tokenizer = AutoTokenizer.from_pretrained(SFT_PATH)
+    tokenizer = AutoTokenizer.from_pretrained(cli.sft_path)
     tokenizer.pad_token = tokenizer.eos_token
 
     print("Loading base + SFT adapter and merging...")
     base = AutoModelForCausalLM.from_pretrained(MODEL_NAME, torch_dtype=dtype).to(device)
-    model = PeftModel.from_pretrained(base, SFT_PATH).merge_and_unload()
+    print(f"SFT adapter: {cli.sft_path}")
+    model = PeftModel.from_pretrained(base, cli.sft_path).merge_and_unload()
     model.config.use_cache = False
 
     peft_config = LoraConfig(
