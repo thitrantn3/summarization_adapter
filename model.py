@@ -11,7 +11,9 @@ def train_dtype():
     return torch.float32
 
 
-def get_lora_model():
+def get_lora_model(init_adapter=None):
+    """Base model + trainable LoRA. With init_adapter, continue training that saved adapter
+    (same rank/targets as when it was trained) instead of starting a fresh one."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = train_dtype()
     print(f'device is {device}, base dtype {dtype}')
@@ -34,8 +36,13 @@ def get_lora_model():
         task_type="CAUSAL_LM"
     )
 
-    # Wrap the base model with PEFT's get_peft_model function
-    peft_model = get_peft_model(base_model, lora_config)
+    if init_adapter:
+        from peft import PeftModel
+        print(f'Continuing from adapter {init_adapter}')
+        peft_model = PeftModel.from_pretrained(base_model, init_adapter, is_trainable=True)
+    else:
+        # Wrap the base model with PEFT's get_peft_model function
+        peft_model = get_peft_model(base_model, lora_config)
 
     # Move all weights to GPU
     peft_model.to(device)

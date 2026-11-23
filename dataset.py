@@ -50,6 +50,38 @@ def encode(example, tok, max_length=MAX_LENGTH, max_summary_tokens=MAX_SUMMARY_T
             "attention_mask": [1] * len(input_ids), "labels": labels}
 
 
+def encode_prompt_completion(prompt, completion, tok, max_length=MAX_LENGTH,
+                             max_summary_tokens=MAX_SUMMARY_TOKENS):
+    """Same layout as encode(), for a prompt that is already built (e.g. DPO data):
+    prompt + completion + <eos>, loss only on completion + <eos>. Returns None if it doesn't fit."""
+    summary_ids = tok(completion.strip())["input_ids"][:max_summary_tokens] + [tok.eos_token_id]
+    prompt_ids = tok(prompt)["input_ids"]
+    if len(prompt_ids) + len(summary_ids) > max_length:
+        return None  # cutting would drop the "### Summary:" cue or the summary itself
+    return {"input_ids": prompt_ids + summary_ids,
+            "attention_mask": [1] * (len(prompt_ids) + len(summary_ids)),
+            "labels": [-100] * len(prompt_ids) + summary_ids}
+
+
+def load_jsonl_sft(path, tok, completion_col="chosen", max_length=MAX_LENGTH):
+    """Tokenized SFT dataset from a prompt/<completion_col> .jsonl, e.g. dpo_data/genz/train.jsonl."""
+    from datasets import Dataset
+    import json
+
+    rows, skipped = [], 0
+    with open(path) as f:
+        for line in f:
+            r = json.loads(line)
+            enc = encode_prompt_completion(r["prompt"], r[completion_col], tok, max_length)
+            if enc is None:
+                skipped += 1
+            else:
+                rows.append(enc)
+    if skipped:
+        print(f"{path}: skipped {skipped} examples longer than {max_length} tokens")
+    return Dataset.from_list(rows)
+
+
 def load_cnn_dailymail(num_train=NUM_TRAIN, num_val=NUM_VAL):
     ds = load_dataset("cnn_dailymail", "3.0.0")
     return ds["train"].select(range(num_train)), ds["validation"].select(range(num_val))
