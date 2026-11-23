@@ -6,8 +6,10 @@ Batch summarization with the DPO model (base + merged SFT adapter + DPO adapter)
 
 Input formats:
   .csv / .jsonl  one document per row in a `text` column. Optional `instruction`
-                 column (e.g. "Summarize this earnings report for an investor");
-                 any other columns (id, title, ...) are copied to the output.
+                 column (e.g. "Summarize this earnings report for an investor"), or a
+                 `prompt` column with the full prompt, used as is (e.g. the Gen Z DPO
+                 template); `text` is then only used for the number-recall metric.
+                 Any other columns (id, title, ...) are copied to the output.
   .txt           documents separated by a line containing only ---
 
 Output: the input columns plus, per model, <model>_summary, <model>_words,
@@ -61,6 +63,8 @@ def read_docs(path):
 
 
 def build_prompt(row):
+    if (row.get("prompt") or "").strip():  # full prompt given (e.g. same template as the DPO data)
+        return row["prompt"]
     instruction = (row.get("instruction") or DEFAULT_INSTRUCTION).strip().rstrip(":")
     return f"{instruction}:\n\n'{row['text'].strip()}'\n\n### Summary:\n"
 
