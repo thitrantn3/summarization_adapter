@@ -30,6 +30,10 @@
 # INFER_MODEL picks the model(s), side by side in the same CSV (default dpo).
 #   MODE=infer INPUT=docs.csv ADAPTER_RUN=dpo-20261112-211044 PROJECT=... BUCKET=... ./vertex/submit_vertex.sh
 #   MODE=infer INPUT=a.jsonl,b.jsonl INFER_MODEL=base,sft,dpo ADAPTER_RUN=... PROJECT=... BUCKET=... ./vertex/submit_vertex.sh
+# Instead of ADAPTER_RUN, SFT_RUN=<sft- or warmup- run> runs inference on that adapter alone
+# (no DPO), e.g. to check a warm-up before training DPO on it. INFER_MODEL is then from
+# base,sft (default base,sft; "sft" = that run's adapter).
+#   MODE=infer INPUT=dpo_data/genz/news_test.jsonl SFT_RUN=warmup-20261124-083304 PROJECT=... BUCKET=... ./vertex/submit_vertex.sh
 #
 # SFT on CNN/DailyMail (train.py, settings in config.py, data from the repo's t_data/ and
 # r_data/), then eval.py on the new adapter and on the original one for comparison.
@@ -101,7 +105,11 @@ case "$MODE" in
          OUT="/gcs/${BUCKET}/dpo-runs/${ADAPTER_RUN}/${RUN}"
          gcloud storage ls "gs://${ADAPTER#/gcs/}/adapter_model.safetensors" >/dev/null \
            || { echo "No adapter at gs://${ADAPTER#/gcs/}" >&2; exit 1; } ;;
-  infer) : "${ADAPTER_RUN:?set ADAPTER_RUN to a finished training run, e.g. dpo-20261112-211044}"
+  infer) if [ -n "${ADAPTER_RUN:-}" ] && [ -n "${SFT_RUN:-}" ]; then
+           echo "Set ADAPTER_RUN (a DPO run) or SFT_RUN (an sft-/warmup- run), not both" >&2; exit 1
+         fi
+         [ -n "${ADAPTER_RUN:-}${SFT_RUN:-}" ] || {
+           echo "Set ADAPTER_RUN to a DPO run (e.g. dpo-20261112-211044) or SFT_RUN to an sft-/warmup- run" >&2; exit 1; }
          : "${INPUT:?set INPUT to local .csv, .jsonl or .txt file(s) of documents, comma-separated}"
          IFS=, read -r -a INPUTS <<< "$INPUT"
          SEEN=","
@@ -113,14 +121,19 @@ case "$MODE" in
            SEEN+="$b,"
          done
          RUN="infer-${STAMP}"
-         ADAPTER="/gcs/${BUCKET}/dpo-runs/${ADAPTER_RUN}/dpo-text-summary"
          OUT="/gcs/${BUCKET}/inference/${RUN}"
-         INFER_MODEL="${INFER_MODEL:-dpo}"
+         if [ -n "${ADAPTER_RUN:-}" ]; then
+           ADAPTER="/gcs/${BUCKET}/dpo-runs/${ADAPTER_RUN}/dpo-text-summary"
+           INFER_MODEL="${INFER_MODEL:-dpo}"; ALLOWED="base sft dpo"
+           gcloud storage ls "gs://${ADAPTER#/gcs/}/adapter_model.safetensors" >/dev/null \
+             || { echo "No adapter at gs://${ADAPTER#/gcs/}" >&2; exit 1; }
+         else
+           SFT_SRC="$(sft_run_adapter "$SFT_RUN")" || exit 1
+           INFER_MODEL="${INFER_MODEL:-base,sft}"; ALLOWED="base sft"
+         fi
          for m in ${INFER_MODEL//,/ }; do
-           case "$m" in base|sft|dpo) ;; *) echo "INFER_MODEL must be from base,sft,dpo: $m" >&2; exit 1 ;; esac
+           case " $ALLOWED " in *" $m "*) ;; *) echo "INFER_MODEL must be from ${ALLOWED// /,} here: $m" >&2; exit 1 ;; esac
          done
-         gcloud storage ls "gs://${ADAPTER#/gcs/}/adapter_model.safetensors" >/dev/null \
-           || { echo "No adapter at gs://${ADAPTER#/gcs/}" >&2; exit 1; }
          INFER_CMDS=""; OUTPUTS=""
          for f in "${INPUTS[@]}"; do
            b="$(basename "$f")"; stem="${b%.*}"
@@ -158,9 +171,10 @@ case "$GPU" in
   *) echo "GPU must be l4 or a100" >&2; exit 1 ;;
 esac
 
+ADAPTER_DIR="${ADAPTER:-}"   # unset in modes that don't load a DPO adapter
 SFT_PICK="SFT_FLAG=''
-if [ -d ${ADAPTER%/dpo-text-summary}/sft-adapter ]; then
-  cp -r ${ADAPTER%/dpo-text-summary}/sft-adapter /app/sft-adapter; SFT_FLAG='--sft_path /app/sft-adapter'
+if [ -d ${ADAPTER_DIR%/dpo-text-summary}/sft-adapter ]; then
+  cp -r ${ADAPTER_DIR%/dpo-text-summary}/sft-adapter /app/sft-adapter; SFT_FLAG='--sft_path /app/sft-adapter'
 fi
 echo \"SFT adapter: \${SFT_FLAG:-repo peft-text-summary (v1)}\"
 "
@@ -278,9 +292,16 @@ notify \"✅ ${RUN} warm-up done (\$(cat /tmp/best.txt)). Adapter: gs://${OUT#/g
 Next: SFT_RUN=${RUN} DATA_DIR=${DATA_DIR} ./vertex/submit_vertex.sh\"
 "
 elif [ "$MODE" = infer ]; then
+if [ -n "${ADAPTER_RUN:-}" ]; then
 JOB_SCRIPT+="cp -r ${ADAPTER} /app/dpo-text-summary
-${SFT_PICK}${INFER_CMDS}echo done > ${OUT}/_SUCCESS
-notify \"✅ ${RUN} finished (models: ${INFER_MODEL}; adapter ${ADAPTER_RUN}).
+${SFT_PICK}"
+else
+JOB_SCRIPT+="cp -r ${SFT_SRC} /app/sft-adapter; SFT_FLAG='--sft_path /app/sft-adapter'
+echo \"SFT adapter: ${SFT_RUN} (${SFT_SRC##*/})\"
+"
+fi
+JOB_SCRIPT+="${INFER_CMDS}echo done > ${OUT}/_SUCCESS
+notify \"✅ ${RUN} finished (models: ${INFER_MODEL}; adapter ${ADAPTER_RUN:-${SFT_RUN:-}}).
 \$(grep -o 'wrote [0-9]* summaries x [0-9]* models' /tmp/job.log)
 Results:
 ${OUTPUTS}\""
