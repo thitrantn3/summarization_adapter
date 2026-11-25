@@ -1,0 +1,334 @@
+QWEN2.5-3B SUMMARIZATION: TRAINING SUMMARY
+Generated 2026-11-22 from the repo's scripts, configs, data files and Vertex AI run logs.
+Section 7 (Gen Z news summaries: dataset, warm-up, DPO) added 2026-11-24;
+3-epoch warm-up results and warm-up vs DPO comparison added 2026-11-25.
+
+======================================================================
+1. BASE MODEL
+======================================================================
+- Qwen/Qwen2.5-3B: the raw pretrained model, not the Instruct version.
+  It is not trained to follow instructions or to stop after an answer,
+  so its output has to be trimmed with stop strings.
+- About 3B parameters (~6 GB in bf16). All training used LoRA adapters;
+  the base weights were never changed.
+
+======================================================================
+2. DATASETS
+======================================================================
+SFT
+  Dataset : cnn_dailymail 3.0.0 (news articles + highlight bullet points)
+  Size    : 1,000 train / 200 val (the first rows of each split)
+  Format  : "Summarize the following text:\n\n{article}\n\n### Summary:\n{highlights}"
+
+DPO
+  Dataset : stindardlogic/document-summarization-dpo-100k
+            (business/technical documents with a preferred and a rejected summary)
+  Size    : 5,000 pairs, shuffled with seed 42 -> 4,750 train / 250 held out
+            (200 used for evaluation)
+  Format  : "{instruction}:\n\n'{document}'\n\n### Summary:\n" + chosen / rejected
+  Lengths : prompts ~370 tokens; preferred summaries ~280 tokens; rejected ~130 tokens
+
+Note: make_dpo_data.py is an alternative way to build DPO pairs (sample from the
+SFT model, rank by ROUGE). It was not used for the final run.
+
+======================================================================
+3. TRAINING PIPELINE
+======================================================================
+STAGE 1: SFT  (dataset.py -> train.py; adapter saved in peft-text-summary/)
+  - LoRA: rank 64, alpha 128, dropout 0.05, on q_proj and v_proj
+  - Batch 1 x gradient accumulation 4, 3 epochs (~750 steps), learning rate 1e-4
+  - fp16 mixed precision, base model loaded in fp32
+  - Early stopping (patience 3), evaluation every 50 steps
+  - Sequences padded/cut to 512 tokens; labels = copy of the full input
+    (loss covers article + summary + padding)
+
+STAGE 2: DPO  (load_hf_dpo_data.py -> train_dpo.py; run on Vertex AI)
+  1. Merge the SFT adapter into the base model -> SFT model
+  2. Add a new LoRA adapter: rank 16, alpha 32, dropout 0.05,
+     on q_proj, k_proj, v_proj, o_proj
+  3. Reference model = the SFT model itself with the new adapter switched off
+     (only one copy of the model in memory)
+
+  - beta 0.1, learning rate 5e-6, cosine schedule, 10% warmup (60 steps)
+  - 1 epoch (594 steps), effective batch 8 (2 x 4), max length 1,024 tokens
+  - bf16, gradient checkpointing on
+  - Hardware: 1x NVIDIA L4, Vertex AI asia-southeast1; 1 h 21 min, ~$1.50-2
+  - Software: torch 2.6, transformers 5.20, trl 1.14, peft 0.21
+  - Output: 30 MB adapter at
+    gs://qwen-dpo-thi-2026/dpo-runs/dpo-20261112-211044/
+  - Final model = base + SFT (merged) + DPO
+
+======================================================================
+4. EVALUATION
+======================================================================
+During DPO training                       Start     1/3 epoch   End
+  Eval loss                               0.693     0.0029      0.0006
+  Held-out pairs, preferred scored higher 45%       100%        100%
+  Score gap (preferred vs rejected)       0.005     5.99        7.62
+
+Generation evaluation (evaluate_dpo.py; 200 held-out prompts, greedy decoding,
+compared against the preferred summary)
+
+  Model   ROUGE-1  ROUGE-2  ROUGE-L  Numbers kept  Words  Bullets
+  base    0.470    0.159    0.285    62.3%         171    5.5
+  sft     0.433    0.148    0.272    71.0%         114    4.3
+  dpo     0.459    0.170    0.305    64.8%         105    10.2
+
+- DPO vs SFT: ROUGE-L higher on 140 of 200 prompts, slightly shorter summaries,
+  much more markdown structure, but fewer source numbers kept.
+- SFT-only evaluation: eval.py computes ROUGE, BLEU and BERTScore on
+  CNN/DailyMail, but its results (eval_results/scores/) are not on this machine.
+- Own documents: side-by-side base/SFT/DPO summaries for 14 documents
+  (9 short, 5 long) are set up. They have no reference summaries, so they are
+  judged by reading them.
+
+======================================================================
+5. POSSIBLE CHALLENGES
+======================================================================
+In SFT (most likely to have hurt quality)
+  1. Most summaries were cut off. CNN/DailyMail examples average 771 tokens but
+     were cut at 512. The summary comes last, so 78% of examples lost part or
+     all of their summary; the model mostly practiced continuing articles.
+  2. Loss computed on everything (article + padding as well as the summary),
+     which weakens the signal for the summary itself.
+  3. Early stopping set up backwards: metric_for_best_model="eval_loss" with
+     greater_is_better=True treats rising loss as improvement. Early stopping
+     may have triggered after ~3 evaluations (~150 steps), and "best model"
+     selection could have picked the worst checkpoint. No training logs
+     survived, so this can't be confirmed.
+  4. Unused/mismatched settings: LEARNING_RATE=2e-4, MAX_STEPS and MAX_LENGTH
+     in config.py are not used by train.py; dataset.py ignores its
+     num_train/num_val arguments.
+
+In DPO
+  5. Different kinds of text: SFT learned short news highlights, DPO learned
+     markdown summaries of business documents, and the user's own documents
+     (blog posts, up to 1,643 tokens) differ from both.
+  6. Pairs too easy: 100% held-out accuracy by 1/3 of the epoch, likely because
+     rejected summaries are much shorter and plainer. The model learned
+     formatting more than content. ~1,500 pairs, or harder pairs, would give
+     similar results for less compute.
+  7. Kept fewer numbers: number recall fell from 71% to 65%, although dropping
+     figures is the dataset's main reason for rejecting a summary.
+
+In evaluation
+  8. ROUGE compares against the dataset's preferred summaries, which DPO was
+     trained to imitate. This favors DPO's style; only one reference per prompt.
+  9. 200 prompts, greedy decoding only; no human or LLM-judge scoring of
+     faithfulness.
+  10. The raw base model doesn't stop by itself, so its scores depend on how
+      the output is trimmed.
+
+Infrastructure (all solved; note for reruns)
+  - Colab's preinstalled torchao too old for recent peft
+  - Newer transformers needs torch >= 2.6 (and a matching torchvision)
+  - T4 has no native bf16
+  - GPU quota requests; L4 shortage in us-central1
+
+======================================================================
+6. HIGHEST-VALUE NEXT STEPS
+======================================================================
+Retrain SFT with:
+  - a longer max length (~1,024 tokens)
+  - loss only on the summary tokens
+  - corrected early-stopping settings
+Then rerun DPO on top of the new SFT model.
+
+======================================================================
+7. GEN Z NEWS SUMMARIES (2026-11-23/24)
+======================================================================
+Goal: summarize news in casual, human-like Gen Z language while keeping the
+facts. Pipeline: build a 1k-pair DPO dataset with Claude -> short SFT
+"warm-up" on the preferred summaries -> DPO on the same pairs.
+
+DATASET  (build_genz_dpo.py; files in dpo_data/genz/, gitignored)
+  Articles : cnn_dailymail 3.0.0 train rows from 1,000 onward (SFT used 0-999),
+             1,260 articles, each cut to 640 Qwen tokens
+  Prompt   : "Summarize the following news article in Gen Z slang:\n\n{article}\n\n### Summary:\n"
+  Writer   : Claude Opus 5.5, effort low, Message Batches API (half price).
+             One call per article returns a Gen Z summary, a robotic summary,
+             a Gen Z summary with one fact changed, and a "sensitive story" flag.
+  Style    : Programmer-RD-AI/genz-slang-pairs-1k -> 60 slang examples in the
+             prompt; HumanLLMs/Human-Like-DPO-Dataset -> 4 casual and 4 robotic
+             tone examples. Neither dataset is used as training pairs (no news;
+             the Human-Like pairs are chit-chat).
+  Chosen   : faithful Gen Z summary, about as long as the CNN highlights
+             (Claude is given the highlights and their word count)
+  Rejected : formal  = CNN highlights rewritten as plain sentences      369
+             robotic = stiff assistant voice ("This article reports")    373
+             wrong   = same Gen Z voice, one fact changed (place, number) 258
+  Filters  : no number in chosen that isn't in the article (digits or words);
+             >= 2 slang terms (1 for sensitive stories); length cap; rejected
+             within 0.7-1.3x of chosen's length
+  Result   : 1,260 articles -> 1,030 passed -> 1,000 pairs (900 train / 100 val)
+             chosen 51 words, rejected 48 on average (no length shortcut)
+             433 sensitive stories (deaths, crime, disasters) in a toned-down voice
+             dropped: 230 too little slang, 8 invented numbers, 2 too long
+  Cost     : ~$9.90 in Claude API usage (3 test runs ~$0.60, main batch ~$8.50,
+             top-up batch ~$0.80)
+
+  Changes made while building it
+  - First prompt gave 70+ word summaries (CNN highlights are ~30-45), so the
+    formal rejected never passed the length check. Fixed by giving Claude
+    the highlights' word count as the target.
+  - Effort low vs medium: same quality on 5 test articles, ~60% fewer output
+    tokens.
+  - Slang check rebuilt as a hand-picked list: words learned from the slang
+    dataset included ordinary words ("the", "city") and news words ("fire",
+    "squad"); it also missed "took the W", "a massive L", "tho", "pulled up".
+  - CNN highlights normalized (they had one fragment per line ending " .") so
+    the formal rejected side differs in style, not formatting.
+
+WARM-UP  (train.py --jsonl; Vertex MODE=warmup, run warmup-20261123-225433)
+  - Continues training the v1 SFT adapter (peft-text-summary, rank 64, q/v)
+    on the 900 chosen summaries; loss only on summary + end-of-text
+  - 1 epoch (225 steps, batch 1 x accumulation 4), learning rate 5e-5
+  - Eval loss  step 50: 1.73  100: 1.61  150: 1.56  200: 1.55  225: 1.55
+    (train loss 2.10 -> ~1.6; still improving slightly, no overfitting)
+  - L4, asia-southeast1: 12 min queue + 13 min running
+  - Adapter: gs://qwen-dpo-thi-2026/sft-runs/warmup-20261123-225433/peft-genz-sft
+
+DPO  (train_dpo.py; Vertex MODE=train with SFT_RUN + DATA_DIR, run dpo-20261123-232101)
+  - Same settings as section 3 (LoRA rank 16 on q/k/v/o, beta 0.1, lr 5e-6,
+    cosine, 10% warmup, effective batch 8); reference = the warm-up model
+  - 1 epoch = 113 steps, eval every 25 steps on the 100 val pairs
+  - Training 19 min (train loss 0.45) inside a 2 h 04 min job (see challenges)
+  - Adapter: gs://qwen-dpo-thi-2026/dpo-runs/dpo-20261123-232101/dpo-text-summary
+    (warm-up adapter copied next to it as sft-adapter/)
+
+  During training (100 val pairs)    Step 25   50      75      100     End
+    Eval loss                        0.629     0.433   0.320   0.297   0.296
+    Chosen scored above rejected     88%       95%     98%     96%     97%
+    Score gap (chosen vs rejected)   0.14      0.69    1.21    1.36    1.37
+    Log-prob of chosen               -109.7    -110.3  -112.1  -112.9  -112.9
+    Log-prob of rejected             -128.2    -134.3  -141.3  -143.6  -143.8
+
+  Reading
+  - Steady learning, not a shortcut: loss levels off at 0.30 with ~97%
+    accuracy. The first DPO run (section 4) hit 0.0006 loss and 100% by 1/3
+    of the epoch because its pairs differed mainly in length and formatting.
+  - The gain comes mostly from lowering the bad summaries (rejected log-prob
+    -128 -> -144); the chosen summaries barely moved (-110 -> -113). DPO
+    mostly learned to avoid the formal, robotic and wrong-fact versions.
+    This looked fine from the metrics alone, but the generation check below
+    shows the 1-epoch warm-up had NOT taught the style, so pushing the
+    rejected side down did not make the model write the chosen style.
+
+GENERATION CHECK  (Vertex MODE=infer, run infer-20261124-075939)
+  - 8 unseen cnn_dailymail test-split articles (dpo_data/genz/news_test.jsonl),
+    same prompt as training; base vs warm-up ("sft") vs DPO side by side
+    (results/genz/summaries-news_test.csv)
+
+    Model     Words  Slang terms   >= 2 slang   Numbers kept  Invented numbers
+    base      74     0.0           0/8          21%           0
+    warm-up   54     0.0           0/8          30%           0
+    DPO       59     0.5           0/8          16%           0
+    (training chosen summaries: 51 words, 2.2 slang terms)
+
+  - The Gen Z style mostly did not transfer. The warm-up model writes
+    casual news ("living the life", "a big deal") with no slang; DPO adds
+    about one term in 5 of 8 summaries, mostly "lowkey" and "ngl", against
+    2.2 per summary in the training data.
+  - Some slang is misused: "they were told to stay low key ... lowkey",
+    "he's got the female vote down low", "a clear warning to keep it lowkey".
+  - No invented numbers from any model, but DPO kept fewer source numbers
+    (16% vs 30% for the warm-up); on the Yemen refugee story it dropped the
+    60 refugees and the $300 fare that the warm-up model kept.
+  - DPO adds opinions the articles don't state ("a stark lesson", "the real
+    MVP", "a true legend"). Tone on the two cancer stories stays respectful.
+  - Likely cause: the warm-up was too light (1 epoch at 5e-5, eval loss
+    still falling), so the model never really learned the slang. DPO then
+    mostly learned to avoid formal/robotic text, which makes output casual
+    but not Gen Z. Greedy decoding also favors the most common wording.
+  - Caveat: 8 articles is a small sample.
+
+STRONGER WARM-UP  (Vertex MODE=warmup WARMUP_EPOCHS=3 WARMUP_LR=1e-4,
+                   run warmup-20261124-083304)
+  - Same data and starting adapter as the first warm-up; 3 epochs (675 steps
+    planned) at learning rate 1e-4, eval every 50 steps, early stopping
+  - Best eval loss 1.38 at step 450 (first warm-up: 1.55); early stopped at
+    step 600, best checkpoint kept
+  - Adapter: gs://qwen-dpo-thi-2026/sft-runs/warmup-20261124-083304/peft-genz-sft
+  - Generation check: Vertex MODE=infer SFT_RUN=warmup-20261124-083304
+    (no DPO adapter), run infer-20261124-203524, same 8 articles
+    (results/genz/warmup3/summaries-news_test.csv)
+
+WARM-UP VS DPO  (same 8 articles; slang counted with build_genz_dpo.py's list)
+
+    Model                      Words  Slang terms  >= 2 slang  Numbers kept  Invented
+    base                       74     0.0          0/8         21%           0
+    warm-up, 1 epoch           54     0.0          0/8         30%           0
+    DPO on 1-epoch warm-up     59     0.5          0/8         16%           0
+    warm-up, 3 epochs          57     1.75         3/8         28%           0
+    (reference highlights: 50 words; training chosen: 51 words, 2.2 slang)
+
+  3-epoch warm-up
+  - The style transferred: "no cap", "fr", "a big W", "straight-up
+    resilient", while keeping numbers about as well as the 1-epoch warm-up
+    and inventing none.
+  - It copies the data's habits: "lowkey" in 5 of 8 summaries (8 times;
+    3 times in the Boris Johnson one), matching "lowkey" in ~48% of the
+    training chosen summaries.
+  - Tone slips on sensitive stories: "...raising more than $1.5 million for
+    research, which is wild" in Lauren Hill's death report.
+  - The Yemen ferry summary keeps the numbers (60 refugees, $300) but
+    muddles who did what (crew vs port guards vs captain).
+
+  What DPO (on the 1-epoch warm-up) changed vs its own starting point
+  - More casual voice: "it's a bummer", "you gotta pre-order", "way higher
+    than expected", "the real MVP", "ngl".
+  - But: misused slang ("a wild ride, lowkey", "keep it lowkey" about a
+    crash, "the female vote down low"), opinions the articles don't state
+    ("a true legend", "a stark lesson: just because you have a fancy car
+    doesn't mean you're a good driver"), and fewer facts (numbers kept
+    30% -> 16%; the Yemen summary lost all its numbers and became mood).
+  - So in this run DPO fixed nothing the 3-epoch warm-up can't do, and the
+    3-epoch warm-up is better on every measure here.
+
+  Why
+  - DPO only moves probability between outputs the model already produces.
+    The 1-epoch warm-up didn't produce slang, so DPO lowered the rejected
+    summaries (-128 -> -144) without raising the chosen (-110 -> -113), and
+    the freed probability went to casual filler and misused slang.
+  - Rejected sides cover formal, robotic and one-changed-fact; none show
+    the warm-up model's actual failures (slang overuse, flippant tone on
+    tragedies, added opinions). The 258 changed-fact pairs did not stop
+    DPO from dropping facts, possibly because a single changed detail is a
+    weaker signal than the style gap in the other 742 pairs.
+  - Lesson: the warm-up has to teach the style; DPO is for removing specific
+    failure modes, so rejected sides should be built from the errors the
+    warm-up model actually makes.
+
+CHALLENGES
+  1. Slang repetition in the data: "lowkey" in ~48% of chosen summaries,
+     "ngl" in ~32%, ~8% open with "Heavy news". Confirmed: the 3-epoch
+     warm-up uses "lowkey" in 5 of 8 test summaries. Fixing it means
+     regenerating with a stronger instruction and a variety check (~$8).
+  2. Occasional added opinion (e.g. "lowkey sus plan" about a refugee plan)
+     that the article doesn't state. Not caught by the filters; needs reading.
+  3. Warm-up and DPO use the same 900 prompts. Fine here (DPO did not start
+     at 100%), but a split would be cleaner for future runs.
+  4. No automatic score for "sounds Gen Z and stays faithful". EVAL_AFTER
+     scores on the business-document set, which doesn't apply here. Options:
+     read side by side, or an LLM judge for style + faithfulness.
+  5. The DPO job ran 2 h 04 min for 19 min of training; the cause of the
+     extra ~1 h 45 min is not yet known.
+  6. The launcher doesn't save DPO trainer_state.json to GCS (the SFT and
+     warm-up modes do); these metrics came from Cloud Logging.
+  7. Security: an old Hugging Face token is in this repo's git history
+     (config.py, from commit 913a146). Revoke it if still active.
+
+NEXT STEPS
+  1. DONE (2026-11-24): stronger warm-up, 3 epochs at 1e-4; its outputs do
+     use slang (1.75 terms per summary, 0 invented numbers).
+  2. Regenerate the data with more varied slang: cap "lowkey" at ~10% of
+     chosen summaries and reject repeated terms within one summary. Then
+     rerun the 3-epoch warm-up, check it, and run DPO on top of it.
+  2b. Build rejected sides from the warm-up model's real failures: the same
+     summary with overused slang, a flippant version of a sensitive story,
+     and a version with an added opinion; keep the changed-fact type.
+  2c. Score with more than 8 articles, ideally with an LLM judge for style,
+     tone and faithfulness.
+  3. Find the DPO job's overhead and save trainer_state.json for DPO runs.
+  4. Optional: start the warm-up from the newer SFT adapter (run
+     sft-20261122-222719) instead of v1 (SFT_RUN=sft-20261122-222719 MODE=warmup).
